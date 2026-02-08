@@ -92,7 +92,10 @@ log_cert_debug() {
     }
   ' 2>/dev/null || true)
 
-  [[ -n "$debug" ]] && log "${tag}：${debug}"
+  if [[ -n "$debug" ]]; then
+    log "${tag}：${debug}"
+  fi
+  return 0
 }
 
 write_validation() {
