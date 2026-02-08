@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # ==========================
 #   Load config & prereqs
@@ -14,6 +14,7 @@ source "$CONF"
 log()  { printf '[%(%F %T)T] %s\n' -1 "$*" | tee -a /var/log/zerossl-ipcert.log; }
 need() { command -v "$1" >/dev/null 2>&1 || { log "缺少依赖：$1"; exit 1; }; }
 need curl; need jq; need openssl
+trap 'rc=$?; log "脚本异常退出：line=${LINENO}, exit=${rc}"' ERR
 
 VALID_DIR="${WEBROOT%/}/.well-known/pki-validation"
 mkdir -p "$VALID_DIR" "$INSTALL_DIR"
@@ -108,15 +109,15 @@ write_validation() {
     .validation.other_methods[$ip].file_validation_url_http
     // .validation.file_validation_url_http
     // empty
-  ')
+  ' 2>/dev/null || true)
   body=$(printf '%s' "$json" | jq -r --arg ip "$IP" '
     .validation.other_methods[$ip].file_validation_content
     // .validation.file_validation_content
     // empty
     | (if type=="array" then join("\n") else . end)
-  ')
+  ' 2>/dev/null || true)
 
-  [[ -n "$http_url" && -n "$body" ]] || { log "未拿到校验信息"; echo "$json" | jq -C .; exit 1; }
+  [[ -n "$http_url" && -n "$body" ]] || { log "未拿到校验信息"; log "原始详情：$(printf '%s' "$json" | jq -c . 2>/dev/null || printf '%s' "$json")"; exit 1; }
 
   # 3) 规范化写入：去 BOM、去 \r，仅保留前三个非空行
   mkdir -p "$VALID_DIR"
@@ -175,25 +176,29 @@ trigger_and_wait() {
 
   for ((i=1; i<=poll_max; i++)); do
     detail=$(curl -sS "https://api.zerossl.com/certificates/$id?access_key=${ZEROSSL_KEY}")
-    status=$(echo "$detail" | jq -r '.status // "unknown"')
+    status=$(echo "$detail" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")
     v_status=$(echo "$detail" | jq -r --arg ip "$IP" '
       .validation.other_methods[$ip].status
       // .validation.status
       // empty
-    ')
+    ' 2>/dev/null || true)
     v_error=$(echo "$detail" | jq -r --arg ip "$IP" '
       .validation.other_methods[$ip].error
       // .validation.error
       // .error
       // empty
       | if type=="object" then (.code|tostring) + ":" + (.type // .message // "unknown") else tostring end
-    ')
+    ' 2>/dev/null || true)
 
     if [[ -n "$v_status" ]]; then
       log "轮询 #$i -> cert=${status}, validation=${v_status}"
     else
       log "轮询 #$i -> cert=${status}"
     fi
+    if [[ "$status" == "unknown" ]]; then
+      log "轮询响应非 JSON：$detail"
+    fi
+
     if (( i == 1 || i % 5 == 0 )); then
       log_cert_debug "轮询详情 #$i" "$detail"
     fi
