@@ -164,14 +164,21 @@ trigger_and_wait() {
   r=$(curl -sS -X POST "https://api.zerossl.com/certificates/${id}/challenges?access_key=${ZEROSSL_KEY}" \
        -d validation_method=HTTP_CSR_HASH)
   log "挑战返回（HTTP_CSR_HASH）：$(echo "$r" | jq -c '.')"
-  if ! echo "$r" | jq -e '.success == true' >/dev/null 2>&1; then
+  if echo "$r" | jq -e '.success == true or .status == "pending_validation" or .status == "issued"' >/dev/null 2>&1; then
+    log "HTTP_CSR_HASH 已接受，进入轮询"
+  else
     log "HTTP_CSR_HASH 触发失败：$(echo "$r" | jq -c '.error // .')"
-    log "触发校验（FILE_CSR_HASH）"
-    r=$(curl -sS -X POST "https://api.zerossl.com/certificates/${id}/challenges?access_key=${ZEROSSL_KEY}" \
-         -d validation_method=FILE_CSR_HASH)
-    log "挑战返回（FILE_CSR_HASH）：$(echo "$r" | jq -c '.')"
-    if ! echo "$r" | jq -e '.success == true' >/dev/null 2>&1; then
-      log "FILE_CSR_HASH 触发失败：$(echo "$r" | jq -c '.error // .')"
+    if [[ "${ENABLE_FILE_CSR_HASH_FALLBACK:-0}" == "1" ]]; then
+      log "触发校验（FILE_CSR_HASH）"
+      r=$(curl -sS -X POST "https://api.zerossl.com/certificates/${id}/challenges?access_key=${ZEROSSL_KEY}" \
+           -d validation_method=FILE_CSR_HASH)
+      log "挑战返回（FILE_CSR_HASH）：$(echo "$r" | jq -c '.')"
+      if ! echo "$r" | jq -e '.success == true or .status == "pending_validation" or .status == "issued"' >/dev/null 2>&1; then
+        log "FILE_CSR_HASH 触发失败：$(echo "$r" | jq -c '.error // .')"
+        log "挑战触发失败，停止轮询"
+        exit 1
+      fi
+    else
       log "挑战触发失败，停止轮询"
       exit 1
     fi
