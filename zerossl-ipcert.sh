@@ -114,28 +114,68 @@ write_validation() {
 
 trigger_and_wait() {
   local id="$1"
-  local r status
+  local r status detail v_status v_error
+  local poll_max poll_sleep draft_stuck_rounds
 
-  log "触发校验"
+  poll_max="${POLL_MAX_ROUNDS:-60}"
+  poll_sleep="${POLL_INTERVAL_SECONDS:-11}"
+  draft_stuck_rounds="${DRAFT_STUCK_ROUNDS:-12}"
+
+  log "触发校验（HTTP_CSR_HASH）"
   r=$(curl -sS -X POST "https://api.zerossl.com/certificates/${id}/challenges?access_key=${ZEROSSL_KEY}" \
        -d validation_method=HTTP_CSR_HASH)
-  echo "$r" | jq -C . >/dev/null || true
-
-  if ! echo "$r" | grep -q '"success":true'; then
+  if ! echo "$r" | jq -e '.success == true' >/dev/null 2>&1; then
+    log "HTTP_CSR_HASH 触发失败：$(echo "$r" | jq -c '.error // .')"
+    log "触发校验（FILE_CSR_HASH）"
     r=$(curl -sS -X POST "https://api.zerossl.com/certificates/${id}/challenges?access_key=${ZEROSSL_KEY}" \
          -d validation_method=FILE_CSR_HASH)
-    echo "$r" | jq -C . >/dev/null || true
+    if ! echo "$r" | jq -e '.success == true' >/dev/null 2>&1; then
+      log "FILE_CSR_HASH 触发失败：$(echo "$r" | jq -c '.error // .')"
+      log "挑战触发失败，停止轮询"
+      exit 1
+    fi
   fi
 
-  for i in {1..60}; do
-    status=$(curl -sS "https://api.zerossl.com/certificates/$id?access_key=${ZEROSSL_KEY}" | jq -r '.status')
-    log "轮询 #$i -> $status"
+  for ((i=1; i<=poll_max; i++)); do
+    detail=$(curl -sS "https://api.zerossl.com/certificates/$id?access_key=${ZEROSSL_KEY}")
+    status=$(echo "$detail" | jq -r '.status // "unknown"')
+    v_status=$(echo "$detail" | jq -r --arg ip "$IP" '
+      .validation.other_methods[$ip].status
+      // .validation.status
+      // empty
+    ')
+    v_error=$(echo "$detail" | jq -r --arg ip "$IP" '
+      .validation.other_methods[$ip].error
+      // .validation.error
+      // .error
+      // empty
+      | if type=="object" then (.code|tostring) + ":" + (.type // .message // "unknown") else tostring end
+    ')
+
+    if [[ -n "$v_status" ]]; then
+      log "轮询 #$i -> cert=${status}, validation=${v_status}"
+    else
+      log "轮询 #$i -> cert=${status}"
+    fi
+
     [[ "$status" = issued ]] && return 0
     [[ "$status" = cancelled || "$status" = revoked ]] && { log "状态异常：$status"; exit 1; }
-    sleep 11
+
+    if [[ "$v_status" = invalid || "$v_status" = failed ]]; then
+      log "校验失败：${v_error:-unknown}"
+      exit 1
+    fi
+
+    if [[ "$status" = draft && "$i" -ge "$draft_stuck_rounds" ]]; then
+      log "连续 ${i} 轮保持 draft，判定卡住，停止轮询"
+      [[ -n "$v_error" ]] && log "调试信息：$v_error"
+      exit 1
+    fi
+
+    sleep "$poll_sleep"
   done
 
-  log "等待超时"
+  log "等待超时（max=${poll_max}, interval=${poll_sleep}s）"
   exit 1
 }
 
